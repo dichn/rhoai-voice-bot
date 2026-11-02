@@ -1,0 +1,127 @@
+# Open WebUI: browser-based voice interface. Points its native STT/Chat/TTS
+# provider config at the ASR and TTS InferenceServices (in-cluster,
+# ClusterIP-only) and at DeepSeek's external API for chat completions.
+# Service names (voice-asr-predictor / voice-tts-predictor, both port 80)
+# come from KServe's default RawDeployment predictor Service naming and
+# were confirmed empirically after deploying asr-isvc.yaml / tts-isvc.yaml.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: open-webui-data
+  namespace: rhoai-voice-bot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: open-webui-config
+  namespace: rhoai-voice-bot
+data:
+  ENABLE_OLLAMA_API: 'False'
+  WEBUI_AUTH: 'True'
+  # Without this, Open WebUI persists OPENAI_API_KEYS/connections into its
+  # SQLite DB (on the PVC) on first boot and silently ignores env var
+  # changes on later restarts -- confirmed during deployment: updating the
+  # DeepSeek key in the Secret and restarting the pod kept using the OLD
+  # (invalid) key until this was set. Matches the pattern already used by
+  # third_party/openshift-ai-bootstrap/Makefile's bare Open WebUI install
+  # (`oc set env deploy/open-webui ENABLE_PERSISTENT_CONFIG=False`).
+  ENABLE_PERSISTENT_CONFIG: 'False'
+  OPENAI_API_BASE_URLS: 'https://api.deepseek.com/v1'
+  AUDIO_STT_ENGINE: 'openai'
+  AUDIO_STT_OPENAI_API_BASE_URL: 'http://voice-asr-predictor.rhoai-voice-bot.svc.cluster.local/v1'
+  AUDIO_STT_OPENAI_API_KEY: 'not-needed'
+  AUDIO_STT_MODEL: 'fun-asr-nano'
+  AUDIO_TTS_ENGINE: 'openai'
+  AUDIO_TTS_OPENAI_API_BASE_URL: 'http://voice-tts-predictor.rhoai-voice-bot.svc.cluster.local/v1'
+  AUDIO_TTS_OPENAI_API_KEY: 'not-needed'
+  AUDIO_TTS_MODEL: 'cosyvoice3'
+  # Must match a voice registered via `make register-voice` (CosyVoice3
+  # has no built-in preset voices) -- see
+  # misc/rhoai-voice-bot-v0-deploy/SKILL.md.
+  AUDIO_TTS_VOICE: 'default'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: rhoai-voice-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      containers:
+        - name: open-webui
+          image: 'ghcr.io/open-webui/open-webui:main'
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: open-webui-config
+          env:
+            - name: OPENAI_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: voice-bot-secrets
+                  key: DEEPSEEK_API_KEY
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: voice-bot-secrets
+                  key: WEBUI_SECRET_KEY
+          volumeMounts:
+            - name: webui-data
+              mountPath: /app/backend/data
+          resources:
+            requests:
+              cpu: '500m'
+              memory: 1Gi
+            limits:
+              cpu: '2'
+              memory: 2Gi
+      volumes:
+        - name: webui-data
+          persistentVolumeClaim:
+            claimName: open-webui-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  namespace: rhoai-voice-bot
+spec:
+  selector:
+    app: open-webui
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: open-webui
+  namespace: rhoai-voice-bot
+spec:
+  to:
+    kind: Service
+    name: open-webui
+    weight: 100
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+  wildcardPolicy: None

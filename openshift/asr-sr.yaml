@@ -1,0 +1,66 @@
+# ServingRuntime for voice-asr: upstream vLLM (not the RHOAI vLLM image,
+# which is v0.24 and predates FunASR / /v1/audio/transcriptions support).
+# vllm/vllm-openai:v0.27.1 has ENTRYPOINT ["vllm","serve"], so `args` below
+# are passed directly as `vllm serve <args>`; the model id is the first
+# positional arg, downloaded from HuggingFace Hub at container startup
+# (no storageUri / /mnt/models mount needed).
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: voice-asr
+  namespace: rhoai-voice-bot
+  annotations:
+    openshift.io/display-name: voice-asr
+  labels:
+    opendatahub.io/dashboard: 'true'
+spec:
+  annotations:
+    prometheus.io/path: /metrics
+    prometheus.io/port: '8080'
+  containers:
+    - name: kserve-container
+      image: 'docker.io/vllm/vllm-openai:v0.27.1'
+      # The published vllm-openai image does NOT bundle the audio extras
+      # (librosa/soundfile) needed to decode uploaded audio files --
+      # without this, /v1/audio/transcriptions returns 400 "Invalid or
+      # unsupported audio file" with "Please install vllm[audio]" in the
+      # server logs. Install it at startup (still the unmodified published
+      # image, no custom build) before execing the real server.
+      command:
+        - /bin/sh
+        - -c
+      args:
+        - >-
+          pip install --no-cache-dir 'vllm[audio]' &&
+          exec vllm serve FunAudioLLM/Fun-ASR-Nano-2512-vllm
+          --revision=vllm-0.27.1-20260830
+          --served-model-name=fun-asr-nano
+          --port=8080
+          --dtype=float32
+          --gpu-memory-utilization=0.40
+          --enforce-eager
+      env:
+        # OpenShift runs containers as a random non-root UID with no
+        # passwd entry, so $HOME defaults to "/". vLLM's flashinfer
+        # dependency tries to write $HOME/.cache at startup and crashes
+        # with `PermissionError: [Errno 13] Permission denied: '/.cache'`
+        # unless HOME is explicitly pointed at a writable directory.
+        - name: HOME
+          value: /tmp
+        - name: HF_HOME
+          value: /tmp/hf_home
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      volumeMounts:
+        - mountPath: /dev/shm
+          name: shm
+  multiModel: false
+  supportedModelFormats:
+    - autoSelect: true
+      name: vLLM
+  volumes:
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi
+      name: shm

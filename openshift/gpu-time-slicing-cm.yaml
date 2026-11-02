@@ -1,0 +1,27 @@
+# Enables NVIDIA GPU time-slicing so the ASR and TTS InferenceServices can
+# share a single physical GPU (this cluster has only one free GPU across
+# its two gpu-worker nodes; the other is already used by an unrelated
+# workload). This ConfigMap is a named "profile" the NVIDIA GPU Operator's
+# device plugin can apply -- it does NOT change any node's behavior by
+# itself. A node only picks it up once labeled
+# nvidia.com/device-plugin.config=voice-bot (see the Makefile's
+# `enable-gpu-sharing` target), so nodes without that label (e.g. the GPU
+# node already running other workloads) are completely unaffected.
+#
+# Time-slicing shares GPU *compute scheduling* only -- it does not isolate
+# VRAM between pods. The target node is an NVIDIA L40S with 46 GiB VRAM;
+# ASR (--gpu-memory-utilization 0.40) and TTS (--gpu-memory-utilization
+# 0.30) together reserve well under that, leaving headroom.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: time-slicing-config
+  namespace: nvidia-gpu-operator
+data:
+  voice-bot: |-
+    version: v1
+    sharing:
+      timeSlicing:
+        resources:
+        - name: nvidia.com/gpu
+          replicas: 2

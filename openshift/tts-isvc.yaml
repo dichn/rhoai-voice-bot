@@ -1,0 +1,53 @@
+# PVC for the voice-tts speaker cache (/root/.cache/vllm-omni/speakers).
+# Registered voices (POST /v1/audio/voices) are stored here as
+# .safetensors files; without this PVC they would be lost on every pod
+# restart since the ServingRuntime container has no other persistent
+# storage.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: voice-tts-cache
+  namespace: rhoai-voice-bot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: voice-tts
+  namespace: rhoai-voice-bot
+  annotations:
+    opendatahub.io/hardware-profile-name: gpu-profile
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+    openshift.io/display-name: voice-tts
+    serving.kserve.io/deploymentMode: RawDeployment
+    opendatahub.io/model-type: generative
+  # No networking.kserve.io/visibility: exposed -- see asr-isvc.yaml.
+  labels:
+    opendatahub.io/dashboard: 'true'
+    opendatahub.io/genai-asset: 'true'
+spec:
+  predictor:
+    automountServiceAccountToken: false
+    deploymentStrategy:
+      type: Recreate
+    maxReplicas: 1
+    minReplicas: 1
+    model:
+      modelFormat:
+        name: vLLM
+      name: ''
+      resources:
+        limits:
+          cpu: '4'
+          memory: 16Gi
+          nvidia.com/gpu: '1'
+        requests:
+          cpu: '2'
+          memory: 8Gi
+          nvidia.com/gpu: '1'
+      runtime: voice-tts

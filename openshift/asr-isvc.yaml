@@ -1,0 +1,46 @@
+# InferenceService for voice-asr. No storageUri -- the model id is baked
+# into the ServingRuntime's `vllm serve` args and downloaded from
+# HuggingFace Hub directly (storageUri is optional on
+# InferenceService.spec.predictor.model; confirmed via
+# `oc explain inferenceservice.spec.predictor.model.storageUri`).
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: voice-asr
+  namespace: rhoai-voice-bot
+  annotations:
+    opendatahub.io/hardware-profile-name: gpu-profile
+    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+    openshift.io/display-name: voice-asr
+    serving.kserve.io/deploymentMode: RawDeployment
+    opendatahub.io/model-type: generative
+  # No networking.kserve.io/visibility: exposed -- this service has no
+  # auth (no --api-key set on vLLM), so it must stay cluster-internal.
+  # Open WebUI reaches it via the in-cluster Service DNS name, not a
+  # Route. (Applying with `exposed` set, even just via opendatahub.io/
+  # dashboard labels, caused KServe/RHOAI to auto-create an unauthenticated
+  # external Route -- caught and reverted during initial deployment.)
+  labels:
+    opendatahub.io/dashboard: 'true'
+    opendatahub.io/genai-asset: 'true'
+spec:
+  predictor:
+    automountServiceAccountToken: false
+    deploymentStrategy:
+      type: Recreate
+    maxReplicas: 1
+    minReplicas: 1
+    model:
+      modelFormat:
+        name: vLLM
+      name: ''
+      resources:
+        limits:
+          cpu: '4'
+          memory: 12Gi
+          nvidia.com/gpu: '1'
+        requests:
+          cpu: '2'
+          memory: 8Gi
+          nvidia.com/gpu: '1'
+      runtime: voice-asr

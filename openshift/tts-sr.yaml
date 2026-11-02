@@ -1,0 +1,92 @@
+# ServingRuntime for voice-tts: vllm-omni, the only vLLM variant that
+# exposes a dedicated-TTS /v1/audio/speech endpoint for CosyVoice3. This
+# image has NO default entrypoint (per upstream docs), so `command` is
+# set explicitly; `args` are then passed to it.
+#
+# --trust-remote-code is required for CosyVoice3 (it ships custom modeling
+# code) -- matches the official vllm-omni example serve command.
+#
+# CosyVoice3 is voice-cloning-only: it has NO built-in preset voices.
+# A voice must be registered via POST /v1/audio/voices (multipart:
+# audio_sample, consent, name, optional ref_text) before any
+# /v1/audio/speech request using that voice name will succeed. Uploaded
+# voices persist as .safetensors under "$HOME/.cache/vllm-omni/speakers/"
+# (HOME=/tmp below) -- symlinked to the /voice-cache PVC mount further
+# down so registered voices survive pod restarts. See the command/args
+# block and the longer comment there for why this isn't a direct mount.
+#
+# --gpu-memory-utilization is deliberately low (0.30) because this pod
+# shares one physical GPU with voice-asr (0.40) via NVIDIA time-slicing --
+# time-slicing shares compute scheduling only, not VRAM isolation, so both
+# values must be set conservatively to avoid OOM on the shared GPU.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: voice-tts
+  namespace: rhoai-voice-bot
+  annotations:
+    openshift.io/display-name: voice-tts
+  labels:
+    opendatahub.io/dashboard: 'true'
+spec:
+  annotations:
+    prometheus.io/path: /metrics
+    prometheus.io/port: '8080'
+  containers:
+    - name: kserve-container
+      image: 'docker.io/vllm/vllm-omni:v0.32.0'
+      # Voice storage resolves via "$HOME/.cache/vllm-omni/speakers"
+      # (HOME=/tmp below). Mounting the PVC directly at
+      # /tmp/.cache/vllm-omni (first two attempts) made kubelet
+      # auto-create /tmp/.cache as the mount's parent directory, owned
+      # root:root with NO group-write bit -- which then blocked vLLM's
+      # own sibling cache dirs (/tmp/.cache/vllm, /tmp/.cache/flashinfer)
+      # from being created by the container's non-root UID, crash-looping
+      # the whole pod ("PermissionError: '/tmp/.cache/vllm'" /
+      # "'/tmp/.cache/flashinfer'" -- confirmed via `oc exec` + `ls -ld`:
+      # the PVC mount itself was group-writable and fine, but its
+      # kubelet-created parent was not). Fix: mount the PVC at a
+      # standalone path outside /tmp/.cache entirely, then symlink it
+      # into place -- this lets the container's own process freely
+      # create /tmp/.cache (and vllm/flashinfer's dirs within it) exactly
+      # as it already does successfully for ASR.
+      command:
+        - /bin/sh
+        - -c
+      args:
+        - >-
+          mkdir -p "$HOME/.cache" &&
+          ln -sfn /voice-cache "$HOME/.cache/vllm-omni" &&
+          exec vllm serve FunAudioLLM/Fun-CosyVoice3-0.5B-2512
+          --omni
+          --trust-remote-code
+          --served-model-name=cosyvoice3
+          --port=8080
+          --gpu-memory-utilization=0.30
+      env:
+        # See asr-sr.yaml: HOME must be writable under OpenShift's
+        # random non-root UID or vLLM's flashinfer dependency crashes.
+        - name: HOME
+          value: /tmp
+        - name: HF_HOME
+          value: /tmp/hf_home
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      volumeMounts:
+        - mountPath: /dev/shm
+          name: shm
+        - mountPath: /voice-cache
+          name: voice-cache
+  multiModel: false
+  supportedModelFormats:
+    - autoSelect: true
+      name: vLLM
+  volumes:
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi
+      name: shm
+    - persistentVolumeClaim:
+        claimName: voice-tts-cache
+      name: voice-cache
